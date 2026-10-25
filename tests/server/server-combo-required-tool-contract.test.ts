@@ -302,6 +302,76 @@ describe("combo required-tool contract on buffered children (#7456)", () => {
     expect(hits).toEqual(["a", "b"]);
   });
 
+  test("a hosted call for a hosted tool the request never declared still violates", async () => {
+    const hits: string[] = [];
+    const a = serve(() => {
+      hits.push("a");
+      return Response.json(completedWithHostedCall("m1", "web_search_call"));
+    });
+    const b = serve(() => {
+      hits.push("b");
+      return Response.json(completedWithCall("m2", "shell"));
+    });
+    const response = await handleResponsesWith(comboConfig({
+      a: provider("openai-responses", baseUrl(a), "key-a"),
+      b: provider("openai-responses", baseUrl(b), "key-b"),
+    }), requiredRequest({
+      // Function-only catalog: with the default `shell` tools there is no hosted capability
+      // this child was allowed to execute, so its web_search_call satisfies nothing — were
+      // hosted items trusted unconditionally, every target could skip its real job this way.
+      tool_choice: "required",
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("call_m2");
+    expect(hits).toEqual(["a", "b"]);
+  });
+
+  test("a declared hosted capability does not whitelist a different hosted capability", async () => {
+    const hits: string[] = [];
+    const a = serve(() => {
+      hits.push("a");
+      return Response.json(completedWithHostedCall("m1", "file_search_call"));
+    });
+    const b = serve(() => {
+      hits.push("b");
+      return Response.json(completedWithCall("m2", "shell"));
+    });
+    const response = await handleResponsesWith(comboConfig({
+      a: provider("openai-responses", baseUrl(a), "key-a"),
+      b: provider("openai-responses", baseUrl(b), "key-b"),
+    }), requiredRequest({
+      tool_choice: "required",
+      // Declare shell too, so the accepting target's call is not what the undeclared-tool
+      // guard would answer here — only the hosted-capability mismatch is under test.
+      tools: [
+        { type: "web_search" },
+        { type: "function", name: "shell", parameters: { type: "object" } },
+      ],
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("call_m2");
+    expect(hits).toEqual(["a", "b"]);
+  });
+
+  test("an alias declaration covers its capability", async () => {
+    const hits: string[] = [];
+    const a = serve(() => {
+      hits.push("a");
+      return Response.json(completedWithHostedCall("m1", "web_search_call"));
+    });
+    const response = await handleResponsesWith(comboConfig({
+      a: provider("openai-responses", baseUrl(a), "key-a"),
+      b: provider("openai-responses", baseUrl(a), "key-b"),
+    }), requiredRequest({
+      tool_choice: "required",
+      // hosted-tool-policy folds web_search_preview onto the same capability as web_search.
+      tools: [{ type: "web_search_preview" }],
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("web_search_call");
+    expect(hits).toEqual(["a"]);
+  });
+
   test("no tool_choice means the contract is never judged", async () => {
     const hits: string[] = [];
     const a = serve(() => {

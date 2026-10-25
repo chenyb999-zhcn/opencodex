@@ -14,8 +14,13 @@ import { carryResponseToolOwnership } from "./response-tool-ownership";
  * rules remain the only judgment there.
  */
 
-/** `tool_choice` demanding a call: any declared tool, or one named function/custom tool. */
-export type RequiredToolContract = { kind: "any" } | { kind: "named"; name: string };
+/**
+ * `tool_choice` demanding a call: any declared tool — carrying the hosted-call item types the
+ * request's declared hosted tools permit — or one named function/custom tool.
+ */
+export type RequiredToolContract =
+  | { kind: "any"; hostedCallTypes: ReadonlySet<string> }
+  | { kind: "named"; name: string };
 
 /**
  * What the request requires of the child, or undefined when the request requires no tool call
@@ -29,7 +34,12 @@ export function requiredToolContractOf(rawBody: unknown): RequiredToolContract |
   const tools = body.tools;
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   const choice = body.tool_choice;
-  if (choice === "required") return { kind: "any" };
+  if (choice === "required") {
+    const hostedCallTypes = hostedCallTypesOf(tools);
+    // A capability this module cannot map to an output item type makes the demand
+    // unprovable, so the request is not judged at all.
+    return hostedCallTypes === undefined ? undefined : { kind: "any", hostedCallTypes };
+  }
   if (choice && typeof choice === "object" && !Array.isArray(choice)) {
     const named = choice as Record<string, unknown>;
     if ((named.type === "function" || named.type === "custom")
@@ -44,20 +54,48 @@ export function requiredToolContractOf(rawBody: unknown): RequiredToolContract |
 const CALL_ITEM_TYPES = new Set(["function_call", "custom_tool_call"]);
 
 /**
- * Hosted-tool call items. Canonical Responses forwarding preserves the client's hosted-tool
- * declarations into every combo child, so a child may honor `required` by executing one itself
- * and returning the built-in item. That satisfies the demand for SOME call, but it can never
- * satisfy a demand that named a specific function/custom tool, so these count only toward
- * `kind: "any"`.
+ * Hosted-tool DECLARATION type -> the built-in output item type executing it produces.
+ * Canonical Responses forwarding preserves the client's hosted-tool declarations into every
+ * combo child, so a child may honor `required` by executing one itself — but only a declared
+ * capability counts, or a function-only catalog could return an arbitrary hosted call and skip
+ * its real work on every target. Alias spellings fold onto one capability, the same grouping
+ * `hosted-tool-policy` uses for `unsupportedHostedTools`.
  */
-const HOSTED_CALL_ITEM_TYPES = new Set([
-  "web_search_call",
-  "file_search_call",
-  "code_interpreter_call",
-  "image_generation_call",
-  "mcp_call",
-  "computer_call",
+const HOSTED_TOOL_CALL_ITEM_TYPES = new Map<string, string>([
+  ["web_search", "web_search_call"],
+  ["web_search_preview", "web_search_call"],
+  ["file_search", "file_search_call"],
+  ["code_interpreter", "code_interpreter_call"],
+  ["image_generation", "image_generation_call"],
+  ["image_gen", "image_generation_call"],
+  ["mcp", "mcp_call"],
+  ["computer_use", "computer_call"],
+  ["computer_use_preview", "computer_call"],
 ]);
+
+/**
+ * Declarable hosted types (hosted-tool-policy's closed vocabulary) whose output item spelling
+ * this module cannot prove. A request declaring one of these is not judged: the module's
+ * invariant is that only provable violations ever reach the failure path.
+ */
+const UNMAPPABLE_HOSTED_DECLARATIONS = new Set(["x_search", "tool_search", "local_shell"]);
+
+/** The hosted-call item types the declared tools permit, or undefined when judgment must abstain. */
+function hostedCallTypesOf(tools: readonly unknown[]): ReadonlySet<string> | undefined {
+  const out = new Set<string>();
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
+    const type = (tool as Record<string, unknown>).type;
+    if (typeof type !== "string") continue;
+    const callType = HOSTED_TOOL_CALL_ITEM_TYPES.get(type);
+    if (callType) {
+      out.add(callType);
+    } else if (UNMAPPABLE_HOSTED_DECLARATIONS.has(type)) {
+      return undefined;
+    }
+  }
+  return out;
+}
 
 /**
  * Whether the completed payload carries the demanded call. A missing or non-array `output`,
@@ -71,7 +109,9 @@ function carriesRequiredCall(payload: Record<string, unknown>, requirement: Requ
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const call = item as Record<string, unknown>;
     if (typeof call.type !== "string") continue;
-    if (requirement.kind === "any" && HOSTED_CALL_ITEM_TYPES.has(call.type)) return true;
+    // A hosted item satisfies the demand for SOME call only when its capability was declared;
+    // it can never satisfy a demand that named a specific function/custom tool.
+    if (requirement.kind === "any" && requirement.hostedCallTypes.has(call.type)) return true;
     if (!CALL_ITEM_TYPES.has(call.type)) continue;
     if (requirement.kind === "any") return true;
     if (typeof call.name !== "string" || call.name === requirement.name) return true;
