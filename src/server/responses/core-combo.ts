@@ -113,9 +113,10 @@ import {
   markEagerRelaySseResponse,
 } from "../relay";
 import { preflightComboStreamResponse } from "./combo-stream-preflight";
+import { judgeBufferedRequiredTool, requiredToolContractOf } from "./combo-required-tool-contract";
 import { streamingContextOverflowResponse, jsonContextOverflowResponse, lateAttributionLimitResponse } from "./context-overflow";
 import { mandatoryResponsesReasoningReplayUnavailable } from "./core-replay";
-import { settleOperatorReplacement } from "../../lib/upstream-retry";
+import { isNonReplayableResponse, settleOperatorReplacement } from "../../lib/upstream-retry";
 import { createComboProtocolLanes, dispatchNativeComboChild } from "./core-combo-native";
 import { createJevModelInvoker } from "./jev-model-invoke";
 import { comboRequestedEffortLabel } from "./combo-requested-effort";
@@ -1154,6 +1155,25 @@ export async function executeComboResponses(
         response = preflight.response;
         if (nativePassthrough) markNativePassthroughSseResponse(response);
         if (eagerRelay) markEagerRelaySseResponse(response);
+      }
+    }
+
+    // #7456: a buffered child that answers a tool_choice-required request with a completed body
+    // carrying no call item is a false success — the client's loop ends with nothing to execute
+    // and the hop machinery, reachable only from a non-OK response, never sees it. Judge the
+    // safe shape (fully buffered, uncommitted, unmarked Responses body) before the commit below;
+    // a violation joins the ordinary failure path, where the existing ambiguous-resend and
+    // spent-replacement guards keep replay safety. Streaming children are deliberately out of
+    // scope: their preflight owns zero-output terminals, and a streamed text-only completion
+    // stays delivered rather than re-dispatched after the client has seen output.
+    if (response.ok
+      && clientWireOf(response) === undefined
+      && !isNonReplayableResponse(response)
+      && (response.headers.get("content-type") ?? "").includes("application/json")) {
+      const requiredTool = requiredToolContractOf(rawBody);
+      if (requiredTool) {
+        const verdict = await judgeBufferedRequiredTool(response, requiredTool);
+        response = verdict.response;
       }
     }
 

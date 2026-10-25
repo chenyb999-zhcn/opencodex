@@ -25,6 +25,13 @@ export const SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE = "spend_ledger_storage_unava
  * envelope formatter decides whether the identity survives serialization.
  */
 export const UNDECLARED_TOOL_CALL_ERROR_CODE = "undeclared_tool_call";
+/**
+ * Wire code for the required-tool contract verdict (#7456): a buffered combo child answered a
+ * `tool_choice`-required request with a completed body carrying no call item. Deterministic
+ * about the TARGET, not the request, so it must reach the client as a typed compatibility error
+ * rather than an anonymous 502 when every target violates. Same placement reason as above.
+ */
+export const REQUIRED_TOOL_CONTRACT_CODE = "required_tool_contract_unsatisfied";
 
 /** First nonblank string across the canonical upstream error paths, in priority order. */
 export function upstreamErrorMessageFromPayload(payload: unknown): string | undefined {
