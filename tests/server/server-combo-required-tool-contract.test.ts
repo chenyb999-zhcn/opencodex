@@ -141,6 +141,18 @@ function completedWithCall(
   };
 }
 
+/** A completed buffered Responses body whose only output item is a hosted-tool call. */
+function completedWithHostedCall(model: string, itemType: string): Record<string, unknown> {
+  return {
+    id: `resp-hosted-${model}`,
+    object: "response",
+    status: "completed",
+    model,
+    output: [{ id: `hs_${model}`, type: itemType, status: "completed" }],
+    usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+  };
+}
+
 const tools = [{ type: "function", name: "shell", parameters: { type: "object" } }];
 
 function requiredRequest(extra: Record<string, unknown> = {}): Request {
@@ -245,6 +257,51 @@ describe("combo required-tool contract on buffered children (#7456)", () => {
     expect(hits).toEqual(["a"]);
   });
 
+  test("a hosted-tool call satisfies a required contract when the hosted tool is declared", async () => {
+    const hits: string[] = [];
+    const a = serve(() => {
+      hits.push("a");
+      return Response.json(completedWithHostedCall("m1", "web_search_call"));
+    });
+    const response = await handleResponsesWith(comboConfig({
+      a: provider("openai-responses", baseUrl(a), "key-a"),
+      b: provider("openai-responses", baseUrl(a), "key-b"),
+    }), requiredRequest({
+      tool_choice: "required",
+      // The combo forwards hosted-tool declarations to children verbatim, so a child that
+      // honors `required` with a hosted call is a legitimate success, not a violation.
+      tools: [{ type: "web_search" }],
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("web_search_call");
+    expect(hits).toEqual(["a"]);
+  });
+
+  test("a hosted-tool call cannot satisfy a named function-tool demand", async () => {
+    const hits: string[] = [];
+    const a = serve(() => {
+      hits.push("a");
+      return Response.json(completedWithHostedCall("m1", "web_search_call"));
+    });
+    const b = serve(() => {
+      hits.push("b");
+      return Response.json(completedWithCall("m2", "shell"));
+    });
+    const response = await handleResponsesWith(comboConfig({
+      a: provider("openai-responses", baseUrl(a), "key-a"),
+      b: provider("openai-responses", baseUrl(b), "key-b"),
+    }), requiredRequest({
+      tool_choice: { type: "function", name: "shell" },
+      tools: [
+        { type: "function", name: "shell", parameters: { type: "object" } },
+        { type: "web_search" },
+      ],
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("call_m2");
+    expect(hits).toEqual(["a", "b"]);
+  });
+
   test("no tool_choice means the contract is never judged", async () => {
     const hits: string[] = [];
     const a = serve(() => {
@@ -327,6 +384,30 @@ describe("combo required-tool contract on buffered children (#7456)", () => {
   });
 });
 
+describe("judgeBufferedRequiredTool body rebuild (PR #7711 review)", () => {
+  test("an accepted rebuild drops representation headers that described the encoded body", async () => {
+    const payload = {
+      id: "r1",
+      status: "completed",
+      output: [{ type: "function_call", name: "shell", call_id: "c1", arguments: "{}" }],
+    };
+    // A compressed upstream carries both headers; `response.text()` decodes the body, so the
+    // rebuilt plain-text Response must not keep describing the encoded bytes.
+    const response = new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "Content-Type": "application/json", "Content-Encoding": "gzip", "Content-Length": "999" },
+    });
+    const verdict = await judgeBufferedRequiredTool(response, { kind: "named", name: "shell" });
+    expect(verdict.kind).toBe("accepted");
+    if (verdict.kind !== "accepted") return;
+    expect(verdict.response.headers.get("content-encoding")).toBeNull();
+    expect(verdict.response.headers.get("content-length")).toBeNull();
+    expect(verdict.response.headers.get("content-type")).toContain("application/json");
+    expect(JSON.parse(await verdict.response.text())).toEqual(payload);
+  });
+});
+
+const { judgeBufferedRequiredTool } = await import("../../src/server/responses/combo-required-tool-contract");
 const { handleResponses } = await import("../../src/server/responses");
 
 async function handleResponsesWith(config: OcxConfig, request: Request, parent?: RequestLogContext) {

@@ -44,6 +44,22 @@ export function requiredToolContractOf(rawBody: unknown): RequiredToolContract |
 const CALL_ITEM_TYPES = new Set(["function_call", "custom_tool_call"]);
 
 /**
+ * Hosted-tool call items. Canonical Responses forwarding preserves the client's hosted-tool
+ * declarations into every combo child, so a child may honor `required` by executing one itself
+ * and returning the built-in item. That satisfies the demand for SOME call, but it can never
+ * satisfy a demand that named a specific function/custom tool, so these count only toward
+ * `kind: "any"`.
+ */
+const HOSTED_CALL_ITEM_TYPES = new Set([
+  "web_search_call",
+  "file_search_call",
+  "code_interpreter_call",
+  "image_generation_call",
+  "mcp_call",
+  "computer_call",
+]);
+
+/**
  * Whether the completed payload carries the demanded call. A missing or non-array `output`,
  * and a named choice carried by an item with no name to read, stay SATISFIED: this judges only
  * what it can prove violated, and everything unprovable keeps its current delivery.
@@ -54,7 +70,9 @@ function carriesRequiredCall(payload: Record<string, unknown>, requirement: Requ
   for (const item of output) {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const call = item as Record<string, unknown>;
-    if (typeof call.type !== "string" || !CALL_ITEM_TYPES.has(call.type)) continue;
+    if (typeof call.type !== "string") continue;
+    if (requirement.kind === "any" && HOSTED_CALL_ITEM_TYPES.has(call.type)) return true;
+    if (!CALL_ITEM_TYPES.has(call.type)) continue;
     if (requirement.kind === "any") return true;
     if (typeof call.name !== "string" || call.name === requirement.name) return true;
   }
@@ -108,10 +126,15 @@ export async function judgeBufferedRequiredTool(
   if (payload?.status === "completed" && !carriesRequiredCall(payload, requirement)) {
     return { kind: "violation", response: violationResponse(requirement) };
   }
+  // `text()` decoded the body, so representation headers copied from a compressed original
+  // would describe bytes this plain-text Response no longer carries.
+  const headers = new Headers(response.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
   const rebuilt = new Response(text, {
     status: response.status,
     statusText: response.statusText,
-    headers: response.headers,
+    headers,
   });
   return { kind: "accepted", response: carryResponseToolOwnership(response, rebuilt) };
 }
