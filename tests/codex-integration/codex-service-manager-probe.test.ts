@@ -243,6 +243,61 @@ describe("could not ask is not an answer", () => {
   });
 
   /**
+   * Measured on a headless macOS session (#7697): `launchctl print gui/<uid>/…`
+   * answers `Could not print domain: 125: Domain does not support specified
+   * action`, while the user-domain query in the same session answers 113. 125
+   * is label-independent like 112 — an unbootable GUI domain cannot hold a
+   * loaded job — so the probe must continue to the user domain and keep the
+   * plist checks instead of returning `unknown` before either runs.
+   */
+  test("GUI-domain exit 125 with the user domain answering 113 and no plist is absent", () => {
+    const { run, calls } = recorder((_file, args) => (
+      String(args[1]).startsWith("gui/")
+        ? { status: 125, stderr: "Could not print domain: 125: Domain does not support specified action" }
+        : { status: 113 }
+    ));
+    const result = inspectServiceManagerInstallation({ run, platform: "darwin", uid: 501, home });
+    // The early return the issue reported skipped the second domain entirely.
+    expect(calls.map(c => c.args[1])).toEqual([
+      "gui/501/com.opencodex.proxy",
+      "user/501/com.opencodex.proxy",
+    ]);
+    expect(result).toEqual({ kind: "absent" });
+  });
+
+  test("GUI-domain exit 125 still reports a staged plist with its homes", () => {
+    const path = writePlist("/somewhere/.codex", "/somewhere/.opencodex");
+    const { run } = recorder((_file, args) => (
+      String(args[1]).startsWith("gui/") ? { status: 125 } : { status: 113 }
+    ));
+    const result = inspectServiceManagerInstallation({ run, platform: "darwin", uid: 501, home });
+    expect(result.kind).toBe("present");
+    if (result.kind !== "present") return;
+    expect(result.claims[0].registration).toBe("absent");
+    expect(result.claims[0].definitionPath).toBe(path);
+    expect(result.claims[0].homes).toEqual({ codexHome: "/somewhere/.codex", opencodexHome: "/somewhere/.opencodex" });
+  });
+
+  test("GUI-domain exit 125 does not hide a job loaded in the user domain", () => {
+    writePlist("/somewhere/.codex", null);
+    const { run } = recorder((_file, args) => (
+      String(args[1]).startsWith("gui/") ? { status: 125 } : { status: 0 }
+    ));
+    const result = inspectServiceManagerInstallation({ run, platform: "darwin", uid: 501, home });
+    expect(result.kind).toBe("present");
+    if (result.kind !== "present") return;
+    expect(result.claims[0].registration).toBe("present");
+  });
+
+  test("user-domain exit 125 is still unknown — the fallback failing to answer is not an answer", () => {
+    const { run } = recorder((_file, args) => (
+      String(args[1]).startsWith("gui/") ? { status: 113 } : { status: 125 }
+    ));
+    const result = inspectServiceManagerInstallation({ run, platform: "darwin", uid: 501, home });
+    expect(result.kind).toBe("unknown");
+  });
+
+  /**
    * A dangling symlink at the plist path must not read as a clean machine.
    *
    * Worth stating plainly: this test does NOT distinguish `lstat` from

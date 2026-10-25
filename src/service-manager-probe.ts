@@ -220,6 +220,18 @@ const LAUNCHCTL_NO_SUCH_SERVICE = 113;
  * headless Mac — no GUI domain, and no installation either.
  */
 const LAUNCHCTL_NO_SUCH_DOMAIN = 112;
+/**
+ * 125 in the GUI domain is also an answer about the DOMAIN (#7697).
+ *
+ * Measured on a headless macOS session: `launchctl print gui/<uid>/<label>`
+ * answers `Could not print domain: 125: Domain does not support specified
+ * action` because no GUI login session has booted that domain. A domain with no
+ * session cannot be holding one of our jobs loaded, and the same session
+ * answers the user-domain query normally — 113 when the service is absent — so
+ * stopping at this response would refuse every write on the exact headless
+ * machine the 112 rule above exists to admit.
+ */
+const LAUNCHCTL_DOMAIN_UNSUPPORTED_ACTION = 125;
 
 /**
  * Residue on disk, distinguished from a path that could not be read.
@@ -357,6 +369,17 @@ function inspectLaunchd(deps: Required<Pick<ProbeDeps, "run" | "uid" | "home">>)
     if (printed.status === 0) { registration = "present"; break; }
     if (printed.status === LAUNCHCTL_NO_SUCH_SERVICE) continue;
     if (printed.status === LAUNCHCTL_NO_SUCH_DOMAIN) { unreachableDomains += 1; continue; }
+    /*
+     * A headless session's GUI domain answers 125 without ever looking at the
+     * label (#7697), so it cannot be holding a job and the user-domain query
+     * below still answers for it. Recognition is scoped to `gui/`: the user
+     * domain is the fallback that MUST be able to answer here, and a 125 from
+     * it is a failure to ask, not a clean answer.
+     */
+    if (printed.status === LAUNCHCTL_DOMAIN_UNSUPPORTED_ACTION && domain.startsWith("gui/")) {
+      unreachableDomains += 1;
+      continue;
+    }
     return unknown(`launchctl print exited ${String(printed.status)}: ${printed.stderr.trim()}`);
   }
 
@@ -368,12 +391,13 @@ function inspectLaunchd(deps: Required<Pick<ProbeDeps, "run" | "uid" | "home">>)
       return unknown("launchd has a job loaded but its plist is missing");
     }
     /*
-     * Nothing staged, and every domain either answered "no such service" or does
-     * not exist. 112 is an answer ABOUT THE DOMAIN and is label-independent —
-     * querying a domain with no service name at all returns it — so an
-     * unreachable domain cannot be hiding a job of ours. Calling this `unknown`
-     * instead would refuse every write on a fresh headless Mac, which has no
-     * GUI domain and no installation either.
+     * Nothing staged, and every domain either answered "no such service", does
+     * not exist (112), or does not support the query (a headless GUI domain's
+     * 125). All three are answers ABOUT THE DOMAIN and are label-independent —
+     * querying a domain with no service name at all returns them — so such a
+     * domain cannot be hiding a job of ours. Calling this `unknown` instead
+     * would refuse every write on a fresh headless Mac, which has no GUI domain
+     * and no installation either.
      */
     void unreachableDomains;
     return { kind: "absent" };
